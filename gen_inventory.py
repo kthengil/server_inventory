@@ -139,27 +139,68 @@ def introduce_errors(inventory: List[Dict[str, Any]], error_spec: Dict[str, Any]
     package_error_count = error_spec["package"]["count"]
     space_error_count = error_spec["space"]["count"]
     
-    # Make a copy of the inventory to modify
-    inventory = [server.copy() for server in inventory]
+    # Make a deep copy of the inventory to modify
+    import copy
+    inventory = copy.deepcopy(inventory)
+    
+    print(f"[DEBUG] Introducing {space_error_count} space errors and {package_error_count} package errors")
     
     # Select random servers for space errors
-    space_error_servers = random.sample(inventory, space_error_count)
-    for server in space_error_servers:
-        server["free_space"] = {
-            "/boot": error_spec["space"]["boot"],
-            "/": error_spec["space"]["root"],
-            "/var": error_spec["space"]["var"],
-            "/tmp": error_spec["space"]["tmp"]
-        }
+    if space_error_count > 0:
+        space_error_servers = random.sample(inventory, min(space_error_count, len(inventory)))
+        print(f"[DEBUG] Selected {len(space_error_servers)} servers for space errors")
+        
+        for i, server in enumerate(space_error_servers):
+            print(f"[DEBUG] Processing space error for server {i+1}: {server['server']}")
+            
+            # Randomly choose which mount points to affect (1-4 mount points)
+            mount_points = ["/boot", "/", "/var", "/tmp"]
+            num_affected = random.randint(1, 4)
+            affected_mounts = random.sample(mount_points, num_affected)
+            
+            print(f"[DEBUG] Affecting mount points: {affected_mounts}")
+            
+            for mount_point in affected_mounts:
+                if mount_point == "/boot":
+                    server["free_space"][mount_point] = error_spec["space"]["boot"]
+                elif mount_point == "/":
+                    server["free_space"][mount_point] = error_spec["space"]["root"]
+                elif mount_point == "/var":
+                    server["free_space"][mount_point] = error_spec["space"]["var"]
+                elif mount_point == "/tmp":
+                    server["free_space"][mount_point] = error_spec["space"]["tmp"]
+            
+            print(f"[DEBUG] Updated free_space: {server['free_space']}")
     
     # Select random servers for package errors (may overlap with space errors)
-    package_error_servers = random.sample(inventory, package_error_count)
-    for server in package_error_servers:
-        bad_package = random.choice(flagged_packages)
-        if bad_package not in server["packages"]:
-            # Replace a random package with the bad one
-            idx = random.randint(0, len(server["packages"]) - 1)
-            server["packages"][idx] = bad_package
+    if package_error_count > 0:
+        package_error_servers = random.sample(inventory, min(package_error_count, len(inventory)))
+        print(f"[DEBUG] Selected {len(package_error_servers)} servers for package errors")
+        
+        for i, server in enumerate(package_error_servers):
+            print(f"[DEBUG] Processing package error for server {i+1}: {server['server']}")
+            
+            bad_package = random.choice(flagged_packages)
+            print(f"[DEBUG] Selected flagged package: {bad_package}")
+            
+            # Get the base package name (e.g., "glibc" from "glibc-1.12-136.el7_9.x86_64")
+            package_base = bad_package.split('-')[0]
+            
+            # Try to find and replace existing package with same base name
+            replaced = False
+            for j, existing_pkg in enumerate(server["packages"]):
+                if existing_pkg.startswith(package_base + '-'):
+                    print(f"[DEBUG] Replacing existing package {existing_pkg} with {bad_package}")
+                    server["packages"][j] = bad_package
+                    replaced = True
+                    break
+            
+            if not replaced:
+                # Replace a random package if no matching base package found
+                idx = random.randint(0, len(server["packages"]) - 1)
+                old_package = server["packages"][idx]
+                server["packages"][idx] = bad_package
+                print(f"[DEBUG] Replaced random package {old_package} with {bad_package}")
     
     return inventory
 
@@ -187,24 +228,21 @@ def generate_inventory(inventory_size: int,
 
 # Example usage
 if __name__ == "__main__":
-    # Define the error specification
+    # Define the error specification with realistic low space thresholds
     error_specification = {
         "space": {
-            "count": 35,
-            "boot": 120,
-            "root": 1500,
-            "var": 1500,
-            "tmp": 1500
+            "count": 30,
+            "boot": 50,     # Very low /boot space (< 100MB is critical)
+            "root": 800,    # Low root space (< 1GB is concerning)
+            "var": 900,     # Low /var space (< 1GB is concerning for logs)
+            "tmp": 400      # Low temp space (< 500MB can cause issues)
         },
         "package": {
             "flagged_list": [
-                "glibc-1.12-136.el7_9.x86_64",
-                "make-2.12-24.el7.x86_64",
-                "openssl-1.0.1e-34.el7.x86_64",
-                "bash-4.1.2-15.el7_4.x86_64",
-                "python-2.7.5-34.el7.x86_64"
+                "glibc-1.14-153.el7_9.x86_64",     # Vulnerable glibc version
+                "sudo-1.8.23-3.el7.x86_64"         # Vulnerable sudo version
             ],
-            "count": 40
+            "count": 45
         }
     }
     
@@ -212,11 +250,12 @@ if __name__ == "__main__":
     campaign_start = "01-01-2023"
     campaign_end = "31-01-2023"
     
-    # Generate inventory (e.g., 200 servers with 30 applications, 150 booked servers)
+    # Generate inventory
+    print("Generating inventory...")
     inventory = generate_inventory(
-        inventory_size=200,
+        inventory_size=350,
         total_apps=30,
-        booked_servers=150,
+        booked_servers=200,
         campaign_start=campaign_start,
         campaign_end=campaign_end,
         error_spec=error_specification
@@ -227,3 +266,31 @@ if __name__ == "__main__":
         json.dump(inventory, f, indent=2)
     
     print("Inventory generated and saved to server_inventory.json")
+    
+    # Analysis for verification
+    print("\n=== Analysis ===")
+    space_errors = {"boot": 0, "root": 0, "var": 0, "tmp": 0}
+    package_errors = 0
+    flagged_packages = error_specification["package"]["flagged_list"]
+    
+    for server in inventory:
+        # Check space errors
+        if server["free_space"]["/boot"] <= 100:  # Boot space critical threshold
+            space_errors["boot"] += 1
+        if server["free_space"]["/"] <= 1000:  # Root space critical threshold
+            space_errors["root"] += 1
+        if server["free_space"]["/var"] <= 1000:  # Var space critical threshold
+            space_errors["var"] += 1
+        if server["free_space"]["/tmp"] <= 500:  # Tmp space critical threshold
+            space_errors["tmp"] += 1
+        
+        # Check package errors
+        for package in server["packages"]:
+            if package in flagged_packages:
+                package_errors += 1
+                break
+    
+    print(f"Space errors - /boot: {space_errors['boot']}, /: {space_errors['root']}, /var: {space_errors['var']}, /tmp: {space_errors['tmp']}")
+    print(f"Servers with flagged packages: {package_errors}")
+    print(f"Expected space errors: {error_specification['space']['count']}")
+    print(f"Expected package errors: {error_specification['package']['count']}")
